@@ -401,6 +401,31 @@ CODEC_FOR = {
 }
 
 
+def _extract_embedded_cover(input_path: str, exe: str) -> Optional[str]:
+    """Pull an embedded cover image out to a temp .jpg. Returns path or None.
+
+    Used for Matroska output, where cover art must be re-added as a container
+    attachment (not a video stream), so a source cover has to be materialised
+    to a file first.
+    """
+    fd, tmp = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        subprocess.run(
+            [exe, "-hide_banner", "-y", "-i", input_path,
+             "-an", "-map", "0:v:0", "-frames:v", "1", "-c:v", "mjpeg", tmp],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if os.path.getsize(tmp) > 0:
+            return tmp
+    except (subprocess.CalledProcessError, OSError):
+        pass
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    return None
+
+
 def convert(input_path: str,
             output_path: str,
             chapters: list,
@@ -467,12 +492,16 @@ def convert(input_path: str,
         mf.write(meta_text)
         meta_file = mf.name
 
+    _attach_tmp = None
     try:
         cmd = [exe, "-hide_banner", "-y" if overwrite else "-n",
                "-i", input_path, "-i", meta_file]
 
+        # Matroska takes cover art as a container attachment (added via
+        # -attach, below), NOT as a mapped -i video input — so only feed the
+        # cover as an input for the containers that map it as a stream (m4b).
         cover_input_idx = None
-        if cover_path:
+        if cover_path and container != "mka":
             cmd += ["-i", cover_path]
             cover_input_idx = 2
 
@@ -494,12 +523,21 @@ def convert(input_path: str,
                 cmd += ["-map", "0:v:0?", "-c:v", "copy",
                         "-disposition:v:0", "attached_pic"]
         elif container == "mka":
-            if cover_input_idx is not None:
-                cmd += ["-map", f"{cover_input_idx}:v:0", "-c:v", "copy",
-                        "-disposition:v:0", "attached_pic"]
-            elif keep_source_cover and info.has_cover:
-                cmd += ["-map", "0:v:0?", "-c:v", "copy",
-                        "-disposition:v:0", "attached_pic"]
+            # Matroska cover art is a container ATTACHMENT named cover.*, not a
+            # video stream. Players (Audiobookshelf, Jellyfin, VLC) read the
+            # attachment and ignore an attached_pic-dispositioned video track,
+            # so we attach the image instead of mapping it.
+            attach_src = cover_path
+            if not attach_src and keep_source_cover and info.has_cover:
+                attach_src = _extract_embedded_cover(input_path, exe)
+                _attach_tmp = attach_src
+            if attach_src:
+                is_png = attach_src.lower().endswith(".png")
+                mime = "image/png" if is_png else "image/jpeg"
+                fname = "cover.png" if is_png else "cover.jpg"
+                cmd += ["-attach", attach_src,
+                        "-metadata:s:t:0", f"mimetype={mime}",
+                        "-metadata:s:t:0", f"filename={fname}"]
 
         if container == "opus":
             # Ogg/Opus cover-art embedding is poorly supported; drop video.
@@ -526,7 +564,7 @@ def convert(input_path: str,
             raise ChapterizeError(
                 "ffmpeg failed:\n" + "\n".join(tail[-20:]))
     finally:
-        for tmp in (meta_file, _fetched_cover):
+        for tmp in (meta_file, _fetched_cover, _attach_tmp):
             if tmp:
                 try:
                     os.unlink(tmp)
