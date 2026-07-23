@@ -153,6 +153,12 @@ def _iter_audio(paths, recursive):
 
 
 def cmd_coverfix(args) -> int:
+    # Line-buffer stdout so a long library run shows live progress even when
+    # output is redirected to a file or pipe (Python block-buffers otherwise).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     fixed = skipped = failed = 0
     for path in _iter_audio(args.paths, args.recursive):
         try:
