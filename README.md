@@ -43,6 +43,13 @@ Pick an input file, choose how chapters are found (silence / embedded /
 equal parts / a chapters file), set title, author and cover, hit **Preview
 chapters** to check, then **Convert**.
 
+> **macOS note:** the GUI needs **Tk 8.6 or newer**. The Python that ships
+> at `/usr/bin/python3` on macOS bundles Apple's deprecated **Tk 8.5**, which
+> renders Tk windows *blank* on modern macOS. Run the GUI under a python.org
+> installer build, a Homebrew `python-tk`, or any standalone CPython (all
+> bundle Tk 8.6+). chapterize detects Tk 8.5 and shows a native warning
+> dialog. The **CLI has no such limitation** and works under any Python.
+
 ## CLI
 
 ```bash

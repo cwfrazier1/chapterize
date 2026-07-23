@@ -405,44 +405,41 @@ class App(ttk.Frame):
         self.log.configure(state="disabled")
 
 
-def _force_redraw(root) -> None:
-    """Work around the Apple-shipped Tk 8.5 blank-window bug on modern macOS.
+_TK85_MACOS_MSG = (
+    "This Python is using Apple's deprecated Tk 8.5, which renders Tk "
+    "windows blank on modern macOS — the app window will appear empty.\n\n"
+    "Fix: run chapterize with a Python that bundles Tk 8.6+ (a python.org "
+    "installer, a Homebrew python, or a standalone build). Or use the "
+    "command line, which has no such limitation:\n\n"
+    "    python3 -m chapterize.cli --help"
+)
 
-    Tk 8.5 (the version bundled with /usr/bin/python3 on macOS) frequently
-    maps a window whose ttk content never paints until the window is resized
-    or the app is deactivated/reactivated. Nudging the geometry by a pixel
-    after the event loop is live forces AppKit to composite the content.
-    """
+
+def _stock_macos_tk() -> bool:
+    """True when running under the macOS system python's blank-window Tk 8.5."""
     import sys
-    if sys.platform != "darwin" or tk.TkVersion >= 8.6:
-        return
-    try:
-        root.update_idletasks()
-        w = root.winfo_width() or 760
-        h = root.winfo_height() or 640
-        root.geometry(f"{w + 1}x{h + 1}")
-        root.update_idletasks()
-        root.geometry(f"{w}x{h}")
-        root.update()
-    except Exception:
-        pass
+    return sys.platform == "darwin" and tk.TkVersion < 8.6
 
 
 def main() -> int:
     import sys
+    # A blank Tk window on stock macOS is baffling; a *native* NSAlert (which
+    # messagebox uses) still renders under Tk 8.5, so warn before we map it.
+    if _stock_macos_tk():
+        print("warning: " + _TK85_MACOS_MSG.replace("\n\n", " ").replace("\n", " "),
+              file=sys.stderr)
+        try:
+            warn_root = tk.Tk()
+            warn_root.withdraw()
+            messagebox.showwarning("chapterize — update needed", _TK85_MACOS_MSG)
+            warn_root.destroy()
+        except Exception:
+            pass
+
     root = tk.Tk()
     root.title("chapterize — audiobook chapterizer")
     root.geometry("760x640")
     App(root)
-    if sys.platform == "darwin" and tk.TkVersion < 8.6:
-        print(
-            "warning: this Python uses the deprecated Apple Tk 8.5, which can "
-            "render Tk windows blank on modern macOS. If the window is empty, "
-            "install a python.org build (bundles Tk 8.6) or use the CLI: "
-            "`python3 -m chapterize.cli --help`.",
-            file=sys.stderr,
-        )
-        root.after(200, lambda: _force_redraw(root))
     root.mainloop()
     return 0
 
