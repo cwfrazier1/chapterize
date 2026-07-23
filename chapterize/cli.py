@@ -9,14 +9,10 @@ from . import __version__
 import glob
 
 from .core import (
-    Chapter,
     ChapterizeError,
     add_cover,
     convert,
-    detect_silence_chapters,
-    equal_chapters,
     fetch_audible_chapters,
-    parse_chapters_file,
     probe,
     search_audible,
 )
@@ -31,50 +27,16 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:05.2f}"
 
 
-def _resolve_chapters(args, info) -> list:
-    mode = args.chapters
-    if mode == "embedded":
-        if not info.chapters:
-            raise ChapterizeError(
-                "No embedded chapters found. Try --chapters silence|equal|<file>.")
-        return info.chapters
-    if mode == "silence":
-        return detect_silence_chapters(
-            args.input,
-            noise_db=args.silence_db,
-            min_silence=args.silence_dur,
-            min_chapter=args.min_chapter,
-            ffmpeg=args.ffmpeg,
-            progress=(lambda m: print(f"  {m}", file=sys.stderr)) if args.verbose else None,
-        )
-    if mode == "equal":
-        return equal_chapters(
-            info.duration,
-            count=args.count,
-            length=args.length,
-        )
-    if mode == "audible" or mode.startswith("audible:"):
-        return _resolve_audible_chapters(args, info)
-    # Otherwise treat it as a path to a chapters file.
-    if os.path.isfile(mode):
-        return parse_chapters_file(mode)
-    raise ChapterizeError(
-        f"--chapters {mode!r} is neither a known mode nor an existing file.")
-
-
 def _resolve_audible_chapters(args, info) -> list:
     """Pull the publisher's real chapter markers from Audible (via Audnexus).
 
-    ASIN comes from `--asin`, from `-c audible:<ASIN>`, or is resolved by
-    searching Audible for --title/--author. Warns loudly if the matched
+    Official Audible markers are the only chapter source. The ASIN comes
+    from `--asin`, or is resolved by searching Audible for --title/--author
+    (falling back to the file's own tags). Warns loudly if the matched
     edition's runtime differs from the local file — a mismatch means the
     timestamps belong to a different recording and won't line up.
     """
     asin = args.asin
-    if not asin and args.chapters.startswith("audible:"):
-        tail = args.chapters.split(":", 1)[1].strip()
-        if tail:
-            asin = tail
     if not asin:
         title = args.title or info.tags.get("title")
         author = args.author or info.tags.get("artist") or info.tags.get("album_artist")
@@ -169,10 +131,7 @@ def cmd_audible(args) -> int:
 
 def cmd_convert(args) -> int:
     info = probe(args.input, ffprobe=args.ffprobe)
-    # --asin is a shortcut for --chapters audible.
-    if getattr(args, "asin", None) and args.chapters == "embedded":
-        args.chapters = "audible"
-    chapters = _resolve_chapters(args, info)
+    chapters = _resolve_audible_chapters(args, info)
 
     if not args.output:
         base = os.path.splitext(args.input)[0]
@@ -339,28 +298,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="output container (default: mka = open Opus+Matroska)")
     pc.add_argument("-b", "--bitrate", default="64k",
                     help="audio bitrate (default: 64k, good for speech)")
-    pc.add_argument("-c", "--chapters", default="embedded",
-                    metavar="MODE|FILE",
-                    help="embedded | silence | equal | audible[:ASIN] | "
-                         "<path to chapters file>")
-    # audible / audnexus options
-    pc.add_argument("--asin", help="Audible ASIN for official chapters "
-                                   "(implies --chapters audible)")
+    # Official Audible markers are the only chapter source.
+    pc.add_argument("--asin", help="Audible ASIN for the official chapters "
+                                   "(otherwise resolved by searching Title/Author)")
     pc.add_argument("--region", default="us",
-                    help="Audible marketplace region for --chapters audible "
+                    help="Audible marketplace region "
                          "(us, uk, ca, au, de, fr, jp, it, in, es; default us)")
     pc.add_argument("--no-credits", action="store_true",
                     help="drop 'Opening/End Credits' markers from Audible chapters")
-    # silence options
-    pc.add_argument("--silence-db", type=float, default=-30.0,
-                    help="silence threshold in dB (default: -30)")
-    pc.add_argument("--silence-dur", type=float, default=0.8,
-                    help="min silence length in s to count (default: 0.8)")
-    pc.add_argument("--min-chapter", type=float, default=90.0,
-                    help="min seconds between silence-based chapters (default: 90)")
-    # equal options
-    pc.add_argument("--count", type=int, help="split into N equal chapters")
-    pc.add_argument("--length", type=float, help="split into fixed-length chapters (s)")
     # metadata
     pc.add_argument("--title", help="override audiobook title")
     pc.add_argument("--author", help="set author/artist")
