@@ -61,6 +61,8 @@ class App(ttk.Frame):
         self.title_var = tk.StringVar()
         self.author_var = tk.StringVar()
         self.cover_var = tk.StringVar()
+        self.fetch_cover_var = tk.BooleanVar(value=True)
+        self.generate_cover_var = tk.BooleanVar(value=False)
 
         self._build()
         self.after(120, self._pump)
@@ -124,6 +126,14 @@ class App(ttk.Frame):
         self._row(r, "Cover image")
         ttk.Entry(self, textvariable=self.cover_var).grid(row=r, column=1, sticky="ew", padx=6)
         ttk.Button(self, text="Browse…", command=self._pick_cover).grid(row=r, column=2)
+
+        r += 1
+        cov = ttk.Frame(self)
+        cov.grid(row=r, column=1, columnspan=2, sticky="w", padx=6)
+        ttk.Checkbutton(cov, text="Fetch cover art online if missing",
+                        variable=self.fetch_cover_var).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(cov, text="Generate placeholder if none found",
+                        variable=self.generate_cover_var).pack(side="left")
 
         r += 1
         btns = ttk.Frame(self)
@@ -224,49 +234,73 @@ class App(ttk.Frame):
                 self.q.put(("error", str(e)))
         threading.Thread(target=work, daemon=True).start()
 
-    def _collect_mode_args(self):
-        m = self.mode_var.get()
-        return m
+    def _snapshot(self) -> dict:
+        """Read every Tk variable ON THE MAIN THREAD.
 
-    def _compute_chapters(self):
-        m = self.mode_var.get()
-        info = self.info
-        if info is None:
-            info = probe(self.in_var.get())
-            self.info = info
+        Tkinter is not thread-safe: variables and widgets may only be touched
+        from the thread running the event loop. Worker threads receive this
+        plain-dict snapshot and never call `.get()` themselves.
+        """
+        def sv(name, default=""):
+            var = getattr(self, name, None)
+            return var.get() if var is not None else default
+        return {
+            "input": self.in_var.get(),
+            "output": self.out_var.get(),
+            "fmt": self.fmt_var.get(),
+            "bitrate": self.br_var.get(),
+            "mode": self.mode_var.get(),
+            "file": self.file_var.get(),
+            "count": self.count_var.get(),
+            "length": self.length_var.get(),
+            "title": self.title_var.get(),
+            "author": self.author_var.get(),
+            "cover": self.cover_var.get(),
+            "fetch_cover": self.fetch_cover_var.get(),
+            "generate_cover": self.generate_cover_var.get(),
+            "silence_db": sv("db_var", "-30"),
+            "silence_dur": sv("dur_var", "0.8"),
+            "min_chapter": sv("minch_var", "90"),
+        }
+
+    def _compute_chapters(self, p: dict):
+        """Runs on a worker thread — uses only the plain-dict snapshot `p`."""
+        info = probe(p["input"])
+        m = p["mode"]
         if m == "embedded":
             if not info.chapters:
                 raise ChapterizeError("No embedded chapters in this file.")
             return info.chapters
         if m == "silence":
             return detect_silence_chapters(
-                self.in_var.get(),
-                noise_db=float(self.db_var.get()),
-                min_silence=float(self.dur_var.get()),
-                min_chapter=float(self.minch_var.get()),
+                p["input"],
+                noise_db=float(p["silence_db"]),
+                min_silence=float(p["silence_dur"]),
+                min_chapter=float(p["min_chapter"]),
                 progress=lambda msg: self.q.put(("log", msg)),
             )
         if m == "equal":
-            count = int(self.count_var.get()) if self.count_var.get().strip() else None
-            length = float(self.length_var.get()) if self.length_var.get().strip() else None
+            count = int(p["count"]) if str(p["count"]).strip() else None
+            length = float(p["length"]) if str(p["length"]).strip() else None
             if not count and not length:
                 raise ChapterizeError("Enter a chapter count or a fixed length.")
             return equal_chapters(info.duration, count=count, length=length)
         if m == "file":
-            if not self.file_var.get():
+            if not p["file"]:
                 raise ChapterizeError("Choose a chapters file.")
-            return parse_chapters_file(self.file_var.get())
+            return parse_chapters_file(p["file"])
         raise ChapterizeError("Unknown chapter mode.")
 
     def _preview(self):
         if not self.in_var.get():
             messagebox.showwarning("chapterize", "Choose an input file first.")
             return
+        p = self._snapshot()          # main-thread read
         self._busy(True, "detecting chapters…")
 
         def work():
             try:
-                chapters = self._compute_chapters()
+                chapters = self._compute_chapters(p)
                 self.q.put(("chapters", chapters))
             except ChapterizeError as e:
                 self.q.put(("error", str(e)))
@@ -280,26 +314,29 @@ class App(ttk.Frame):
             return
         if not self.out_var.get():
             self._sync_out_ext()
+        p = self._snapshot()          # main-thread read
         self._busy(True, "converting…")
 
         def work():
             try:
-                chapters = self._compute_chapters()
+                chapters = self._compute_chapters(p)
                 self.q.put(("log", f"{len(chapters)} chapters"))
                 tags = {}
-                if self.title_var.get():
-                    tags["title"] = self.title_var.get()
-                if self.author_var.get():
-                    tags["artist"] = self.author_var.get()
-                    tags["album_artist"] = self.author_var.get()
+                if p["title"]:
+                    tags["title"] = p["title"]
+                if p["author"]:
+                    tags["artist"] = p["author"]
+                    tags["album_artist"] = p["author"]
                 out = convert(
-                    self.in_var.get(),
-                    self.out_var.get(),
+                    p["input"],
+                    p["output"],
                     chapters,
-                    container=self.fmt_var.get(),
-                    bitrate=self.br_var.get(),
+                    container=p["fmt"],
+                    bitrate=p["bitrate"],
                     tags=tags or None,
-                    cover_path=self.cover_var.get() or None,
+                    cover_path=p["cover"] or None,
+                    fetch_cover=p["fetch_cover"],
+                    generate_cover=p["generate_cover"],
                     overwrite=True,
                     progress=lambda msg: self.q.put(("log", msg)),
                 )
