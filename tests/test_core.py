@@ -92,6 +92,17 @@ def test_coverart_image_detection():
     assert _looks_like_image(b"<html>not an image") is None
 
 
+def test_normalize_query():
+    from chapterize.coverart import normalize_query
+    assert normalize_query("Dune (Unabridged)", "Frank Herbert") == ("Dune", "Frank Herbert")
+    assert normalize_query("Harry Potter and the Goblet of Fire, Book 4 (Unabridged)",
+                           "J.K. Rowling") == ("Harry Potter and the Goblet of Fire",
+                                               "J.K. Rowling")
+    assert normalize_query("The Last Lecture", "Randy Pausch, Jeffrey Zaslow") == (
+        "The Last Lecture", "Randy Pausch")
+    assert normalize_query("A Book", "Ann Author and Bob Writer")[1] == "Ann Author"
+
+
 def test_build_ffmetadata_shape():
     meta = build_ffmetadata(
         [Chapter(0, "One"), Chapter(60, "Two=weird;chars")],

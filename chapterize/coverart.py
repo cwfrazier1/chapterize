@@ -129,6 +129,23 @@ _SOURCES = {
 }
 
 
+def normalize_query(title: str, author: str = "") -> tuple:
+    """Strip catalogue noise that defeats title/author search.
+
+    Removes '(Unabridged)'/'(Abridged)', trailing ', Book N' / 'Volume N',
+    bracketed editions, and reduces a multi-author byline to the primary
+    author (the part before the first comma / 'and' / '&').
+    """
+    t = title or ""
+    t = re.sub(r"\s*[\(\[]\s*(?:un)?abridged\s*[\)\]]", " ", t, flags=re.I)
+    t = re.sub(r"\s*[\(\[][^)\]]*edition[^)\]]*[\)\]]", " ", t, flags=re.I)
+    t = re.sub(r",?\s*(?:book|volume|vol\.?|part)\s+\d+\b", " ", t, flags=re.I)
+    t = re.sub(r"\s{2,}", " ", t).strip(" ,-")
+    a = author or ""
+    a = re.split(r"\s*(?:,| and | & )\s*", a, maxsplit=1)[0].strip()
+    return t, a
+
+
 def find_cover(title: str,
                author: str = "",
                dest_dir: Optional[str] = None,
@@ -137,22 +154,35 @@ def find_cover(title: str,
                timeout: float = 15.0) -> Optional[str]:
     """Return a path to a downloaded cover image, or None if nothing found.
 
-    Caller owns the returned temp file and should delete it when done.
+    Tries progressively looser queries: cleaned title+author, then cleaned
+    title alone, then the raw title+author as given. Caller owns the returned
+    temp file and should delete it when done.
     """
     title = (title or "").strip()
     if not title:
         return None
     dest_dir = dest_dir or tempfile.gettempdir()
-    for name in sources:
-        fn = _SOURCES.get(name)
-        if not fn:
-            continue
-        try:
-            path = fn(title, author.strip(), dest_dir, timeout)
-        except Exception:
-            path = None
-        if path:
-            return path
+    clean_t, clean_a = normalize_query(title, author.strip())
+
+    attempts = []
+    seen = set()
+    for t, a in ((clean_t, clean_a), (clean_t, ""), (title.strip(), author.strip())):
+        key = (t.lower(), a.lower())
+        if t and key not in seen:
+            seen.add(key)
+            attempts.append((t, a))
+
+    for t, a in attempts:
+        for name in sources:
+            fn = _SOURCES.get(name)
+            if not fn:
+                continue
+            try:
+                path = fn(t, a, dest_dir, timeout)
+            except Exception:
+                path = None
+            if path:
+                return path
     return None
 
 
