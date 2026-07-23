@@ -405,11 +405,44 @@ class App(ttk.Frame):
         self.log.configure(state="disabled")
 
 
+def _force_redraw(root) -> None:
+    """Work around the Apple-shipped Tk 8.5 blank-window bug on modern macOS.
+
+    Tk 8.5 (the version bundled with /usr/bin/python3 on macOS) frequently
+    maps a window whose ttk content never paints until the window is resized
+    or the app is deactivated/reactivated. Nudging the geometry by a pixel
+    after the event loop is live forces AppKit to composite the content.
+    """
+    import sys
+    if sys.platform != "darwin" or tk.TkVersion >= 8.6:
+        return
+    try:
+        root.update_idletasks()
+        w = root.winfo_width() or 760
+        h = root.winfo_height() or 640
+        root.geometry(f"{w + 1}x{h + 1}")
+        root.update_idletasks()
+        root.geometry(f"{w}x{h}")
+        root.update()
+    except Exception:
+        pass
+
+
 def main() -> int:
+    import sys
     root = tk.Tk()
     root.title("chapterize — audiobook chapterizer")
     root.geometry("760x640")
     App(root)
+    if sys.platform == "darwin" and tk.TkVersion < 8.6:
+        print(
+            "warning: this Python uses the deprecated Apple Tk 8.5, which can "
+            "render Tk windows blank on modern macOS. If the window is empty, "
+            "install a python.org build (bundles Tk 8.6) or use the CLI: "
+            "`python3 -m chapterize.cli --help`.",
+            file=sys.stderr,
+        )
+        root.after(200, lambda: _force_redraw(root))
     root.mainloop()
     return 0
 
