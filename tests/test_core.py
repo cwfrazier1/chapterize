@@ -85,6 +85,13 @@ def test_parse_bad_line_raises():
         os.unlink(p)
 
 
+def test_coverart_image_detection():
+    from chapterize.coverart import _looks_like_image
+    assert _looks_like_image(b"\xff\xd8\xff\xe0rest") == ".jpg"
+    assert _looks_like_image(b"\x89PNG\r\n\x1a\nrest") == ".png"
+    assert _looks_like_image(b"<html>not an image") is None
+
+
 def test_build_ffmetadata_shape():
     meta = build_ffmetadata(
         [Chapter(0, "One"), Chapter(60, "Two=weird;chars")],

@@ -297,11 +297,17 @@ def convert(input_path: str,
             tags: Optional[dict] = None,
             cover_path: Optional[str] = None,
             keep_source_cover: bool = True,
+            fetch_cover: bool = False,
+            generate_cover: bool = False,
             ffmpeg: Optional[str] = None,
             ffprobe: Optional[str] = None,
             overwrite: bool = False,
             progress: Optional[Callable[[str], None]] = None) -> str:
     """Transcode `input_path` to `output_path` embedding `chapters`.
+
+    If the source has no cover art and none is supplied via `cover_path`,
+    `fetch_cover=True` will look one up online (by title/author) and
+    `generate_cover=True` will render a text placeholder as a last resort.
 
     Returns the output path on success.
     """
@@ -318,6 +324,27 @@ def convert(input_path: str,
     tags = {**info.tags, **(tags or {})}
     # A sensible default title from the filename if none present.
     tags.setdefault("title", os.path.splitext(os.path.basename(input_path))[0])
+
+    # --- resolve missing cover art -----------------------------------
+    _fetched_cover = None
+    need_art = not cover_path and not (keep_source_cover and info.has_cover)
+    if need_art and (fetch_cover or generate_cover):
+        from . import coverart  # local import; stdlib-only, no hard dep
+        title = tags.get("title", "")
+        author = tags.get("artist") or tags.get("album_artist") or ""
+        if fetch_cover:
+            if progress:
+                progress("fetching cover art…")
+            _fetched_cover = coverart.find_cover(title, author)
+        if not _fetched_cover and generate_cover:
+            if progress:
+                progress("generating placeholder cover…")
+            _fetched_cover = coverart.generate_placeholder(
+                title, author, ffmpeg=ffmpeg_bin(ffmpeg))
+        if _fetched_cover:
+            cover_path = _fetched_cover
+            if progress:
+                progress("cover art acquired" if fetch_cover else "placeholder made")
 
     meta_text = build_ffmetadata(chapters, info.duration, tags)
     exe = ffmpeg_bin(ffmpeg)
@@ -386,11 +413,74 @@ def convert(input_path: str,
             raise ChapterizeError(
                 "ffmpeg failed:\n" + "\n".join(tail[-20:]))
     finally:
-        try:
-            os.unlink(meta_file)
-        except OSError:
-            pass
+        for tmp in (meta_file, _fetched_cover):
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     if progress:
         progress("done")
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Add cover art to an existing file WITHOUT re-encoding (remux)
+# ---------------------------------------------------------------------------
+def add_cover(input_path: str,
+              cover_path: str,
+              output_path: Optional[str] = None,
+              *,
+              ffmpeg: Optional[str] = None,
+              ffprobe: Optional[str] = None,
+              in_place: bool = False,
+              progress: Optional[Callable[[str], None]] = None) -> str:
+    """Embed `cover_path` into `input_path` by stream-copy (no transcode).
+
+    Works for MP4/M4B/M4A and Matroska. If `in_place`, the original is
+    atomically replaced. Returns the written path.
+    """
+    exe = ffmpeg_bin(ffmpeg)
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext in (".opus", ".ogg", ".oga"):
+        raise ChapterizeError(
+            "Ogg/Opus does not support attached-picture cover art; "
+            "re-run convert to another container to add art.")
+
+    if in_place:
+        fd, tmp_out = tempfile.mkstemp(suffix=ext, dir=os.path.dirname(input_path) or ".")
+        os.close(fd)
+        target = tmp_out
+    else:
+        target = output_path or (os.path.splitext(input_path)[0] + ".cover" + ext)
+        tmp_out = None
+
+    # Map audio only (not the source's chapter *text* track — the ipod/mp4
+    # muxer rejects copying that as a stream) plus the new cover image.
+    # Chapters are carried losslessly by -map_chapters, independent of the
+    # stream map. Any pre-existing attached_pic is dropped and replaced.
+    cmd = [exe, "-hide_banner", "-loglevel", "error", "-y",
+           "-i", input_path, "-i", cover_path,
+           "-map", "0:a", "-map", "1:v:0",
+           "-map_metadata", "0", "-map_chapters", "0",
+           "-c:a", "copy"]
+    codec = "mjpeg" if cover_path.lower().endswith((".jpg", ".jpeg")) else "png"
+    cmd += ["-c:v", codec if ext in (".m4b", ".m4a", ".mp4") else "copy",
+            "-disposition:v:0", "attached_pic"]
+    if ext in (".m4b", ".m4a", ".mp4"):
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(target)
+
+    if progress:
+        progress("embedding cover…")
+    proc = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        if tmp_out and os.path.exists(tmp_out):
+            os.unlink(tmp_out)
+        raise ChapterizeError("ffmpeg cover embed failed:\n" + (proc.stderr or "")[-800:])
+
+    if in_place:
+        os.replace(tmp_out, input_path)
+        return input_path
+    return target

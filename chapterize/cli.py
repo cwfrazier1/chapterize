@@ -6,15 +6,19 @@ import os
 import sys
 
 from . import __version__
+import glob
+
 from .core import (
     Chapter,
     ChapterizeError,
+    add_cover,
     convert,
     detect_silence_chapters,
     equal_chapters,
     parse_chapters_file,
     probe,
 )
+from .coverart import find_cover, generate_placeholder
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -107,6 +111,8 @@ def cmd_convert(args) -> int:
         bitrate=args.bitrate,
         tags=tags or None,
         cover_path=args.cover,
+        fetch_cover=args.fetch_cover,
+        generate_cover=args.generate_cover,
         ffmpeg=args.ffmpeg,
         ffprobe=args.ffprobe,
         overwrite=args.overwrite,
@@ -114,6 +120,84 @@ def cmd_convert(args) -> int:
     )
     print(f"\nDone: {args.output}", file=sys.stderr)
     return 0
+
+
+def _guess_title_author(path, info):
+    """Prefer embedded tags; fall back to Author/Title/file.ext layout."""
+    title = info.tags.get("title")
+    author = info.tags.get("artist") or info.tags.get("album_artist")
+    parent = os.path.basename(os.path.dirname(path))
+    grandparent = os.path.basename(os.path.dirname(os.path.dirname(path)))
+    if not title:
+        title = parent or os.path.splitext(os.path.basename(path))[0]
+    if not author and grandparent and grandparent.lower() not in ("", "books", "audiobooks"):
+        author = grandparent
+    return title, (author or "")
+
+
+def _iter_audio(paths, recursive):
+    exts = (".mp3", ".m4a", ".m4b", ".mp4", ".flac", ".opus", ".ogg", ".aac", ".wav")
+    for p in paths:
+        if os.path.isdir(p):
+            walker = os.walk(p) if recursive else [(p, [], os.listdir(p))]
+            for root, _dirs, files in walker:
+                if "@eaDir" in root:
+                    continue
+                for f in sorted(files):
+                    if f.lower().endswith(exts):
+                        yield os.path.join(root, f)
+        elif any(ch in p for ch in "*?["):
+            yield from (g for g in glob.glob(p) if g.lower().endswith(exts))
+        else:
+            yield p
+
+
+def cmd_coverfix(args) -> int:
+    fixed = skipped = failed = 0
+    for path in _iter_audio(args.paths, args.recursive):
+        try:
+            info = probe(path, ffprobe=args.ffprobe)
+        except ChapterizeError as e:
+            print(f"skip  {path}: {e}", file=sys.stderr)
+            failed += 1
+            continue
+        if info.has_cover and not args.force:
+            skipped += 1
+            if args.verbose:
+                print(f"has   {path}")
+            continue
+        title, author = _guess_title_author(path, info)
+        cover = None
+        if not args.generate_only:
+            cover = find_cover(title, author)
+        generated = False
+        if not cover and (args.generate or args.generate_only):
+            cover = generate_placeholder(title, author, ffmpeg=args.ffmpeg)
+            generated = True
+        if not cover:
+            print(f"none  {path}  (no art for {title!r} / {author!r})")
+            failed += 1
+            continue
+        src = "generated" if generated else "fetched"
+        if args.dry_run:
+            print(f"would {src}+embed  {title!r} ← {os.path.basename(cover)}  [{path}]")
+            os.unlink(cover)
+            fixed += 1
+            continue
+        try:
+            add_cover(path, cover, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe,
+                      in_place=True)
+            print(f"fixed [{src}]  {title}")
+            fixed += 1
+        except ChapterizeError as e:
+            print(f"fail  {path}: {e}", file=sys.stderr)
+            failed += 1
+        finally:
+            if cover and os.path.exists(cover):
+                os.unlink(cover)
+    print(f"\n{fixed} fixed, {skipped} already had art, {failed} failed",
+          file=sys.stderr)
+    return 0 if failed == 0 else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,11 +241,32 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--title", help="override audiobook title")
     pc.add_argument("--author", help="set author/artist")
     pc.add_argument("--cover", help="cover image to embed (jpg/png)")
+    pc.add_argument("--fetch-cover", action="store_true",
+                    help="if source has no cover, look one up online by title/author")
+    pc.add_argument("--generate-cover", action="store_true",
+                    help="if no cover found, render a text placeholder cover")
     pc.add_argument("--overwrite", action="store_true", help="replace existing output")
     pc.add_argument("--dry-run", action="store_true", help="list chapters, don't encode")
     pc.add_argument("-q", "--quiet", action="store_true")
     pc.add_argument("-v", "--verbose", action="store_true")
     pc.set_defaults(func=cmd_convert)
+
+    cx = sub.add_parser("coverfix",
+                        help="add missing cover art to existing files / a library")
+    cx.add_argument("paths", nargs="+",
+                    help="audio files, directories, or globs")
+    cx.add_argument("-r", "--recursive", action="store_true",
+                    help="recurse into directories")
+    cx.add_argument("--generate", action="store_true",
+                    help="render a placeholder cover if none is found online")
+    cx.add_argument("--generate-only", action="store_true",
+                    help="skip online lookup; always render a placeholder")
+    cx.add_argument("--force", action="store_true",
+                    help="re-embed art even if the file already has some")
+    cx.add_argument("--dry-run", action="store_true",
+                    help="report what would be fixed without modifying files")
+    cx.add_argument("-v", "--verbose", action="store_true")
+    cx.set_defaults(func=cmd_coverfix)
 
     return p
 

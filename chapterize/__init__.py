@@ -11,6 +11,7 @@ __version__ = "0.1.0"
 from .core import (  # noqa: F401
     Chapter,
     ChapterizeError,
+    add_cover,
     convert,
     detect_silence_chapters,
     equal_chapters,
@@ -18,3 +19,4 @@ from .core import (  # noqa: F401
     read_embedded_chapters,
     parse_chapters_file,
 )
+from .coverart import find_cover, generate_placeholder  # noqa: F401
