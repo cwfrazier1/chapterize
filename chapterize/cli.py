@@ -15,8 +15,10 @@ from .core import (
     convert,
     detect_silence_chapters,
     equal_chapters,
+    fetch_audible_chapters,
     parse_chapters_file,
     probe,
+    search_audible,
 )
 from .coverart import find_cover, generate_placeholder
 
@@ -51,11 +53,66 @@ def _resolve_chapters(args, info) -> list:
             count=args.count,
             length=args.length,
         )
+    if mode == "audible" or mode.startswith("audible:"):
+        return _resolve_audible_chapters(args, info)
     # Otherwise treat it as a path to a chapters file.
     if os.path.isfile(mode):
         return parse_chapters_file(mode)
     raise ChapterizeError(
         f"--chapters {mode!r} is neither a known mode nor an existing file.")
+
+
+def _resolve_audible_chapters(args, info) -> list:
+    """Pull the publisher's real chapter markers from Audible (via Audnexus).
+
+    ASIN comes from `--asin`, from `-c audible:<ASIN>`, or is resolved by
+    searching Audible for --title/--author. Warns loudly if the matched
+    edition's runtime differs from the local file — a mismatch means the
+    timestamps belong to a different recording and won't line up.
+    """
+    asin = args.asin
+    if not asin and args.chapters.startswith("audible:"):
+        tail = args.chapters.split(":", 1)[1].strip()
+        if tail:
+            asin = tail
+    if not asin:
+        title = args.title or info.tags.get("title")
+        author = args.author or info.tags.get("artist") or info.tags.get("album_artist")
+        if not title:
+            raise ChapterizeError(
+                "audible chapters need an ASIN (--asin) or a --title to search for.")
+        print(f"Searching Audible for {title!r}"
+              + (f" by {author!r}" if author else "") + " ...", file=sys.stderr)
+        hits = search_audible(title, author, region=args.region)
+        if not hits:
+            raise ChapterizeError(
+                f"No Audible match for {title!r}. That edition may be delisted; "
+                "pass --asin <ASIN> directly, or supply a chapters file.")
+        best = hits[0]
+        asin = best["asin"]
+        nar = ", ".join(best.get("narrators") or []) or "?"
+        print(f"  matched {asin}  {best.get('title')!r}  (narr: {nar}, "
+              f"{best.get('runtime_min')} min)", file=sys.stderr)
+
+    chapters, runtime_s = fetch_audible_chapters(
+        asin, region=args.region,
+        keep_credits=not args.no_credits,
+        progress=(lambda m: print(f"  {m}", file=sys.stderr)) if args.verbose else None,
+    )
+    if runtime_s and info.duration:
+        drift = abs(runtime_s - info.duration)
+        if drift > max(30.0, 0.03 * info.duration):
+            print(
+                f"\nWARNING: this file is {_fmt_ts(info.duration)} but Audible "
+                f"edition {asin} is {_fmt_ts(runtime_s)} "
+                f"({drift/60:.1f} min apart).\n"
+                "  These are almost certainly DIFFERENT recordings — the chapter "
+                "timestamps will NOT line up with your audio.\n"
+                "  Find the ASIN whose runtime matches your file, or use a "
+                "chapters file. (Continuing anyway.)\n",
+                file=sys.stderr)
+    print(f"  {len(chapters)} official chapters fetched.", file=sys.stderr)
+    return chapters
 
 
 def cmd_probe(args) -> int:
@@ -75,8 +132,46 @@ def cmd_probe(args) -> int:
     return 0
 
 
+def cmd_audible(args) -> int:
+    """Look up an audiobook's official chapters (no conversion)."""
+    asin = args.asin
+    if not asin:
+        if not args.title:
+            raise ChapterizeError("give a --title to search, or --asin directly.")
+        hits = search_audible(args.title, args.author, region=args.region,
+                              limit=args.limit)
+        if not hits:
+            print(f"No Audible match for {args.title!r}"
+                  + (f" by {args.author!r}" if args.author else "")
+                  + f" in region {args.region}.", file=sys.stderr)
+            return 1
+        if args.search:
+            for h in hits:
+                nar = ", ".join(h.get("narrators") or []) or "?"
+                rt = h.get("runtime_min")
+                rt = f"{rt // 60}h{rt % 60:02d}m" if rt else "?"
+                print(f"{h['asin']}  {rt:>7}  {h.get('title')}  "
+                      f"(narr: {nar})")
+            return 0
+        asin = hits[0]["asin"]
+        print(f"matched {asin}  {hits[0].get('title')!r}", file=sys.stderr)
+
+    chapters, runtime_s = fetch_audible_chapters(
+        asin, region=args.region, keep_credits=not args.no_credits)
+    print(f"ASIN     : {asin}")
+    if runtime_s:
+        print(f"Runtime  : {_fmt_ts(runtime_s)}")
+    print(f"Chapters : {len(chapters)}")
+    for i, ch in enumerate(chapters, 1):
+        print(f"  {i:>3}. {_fmt_ts(ch.start)}  {ch.title}")
+    return 0
+
+
 def cmd_convert(args) -> int:
     info = probe(args.input, ffprobe=args.ffprobe)
+    # --asin is a shortcut for --chapters audible.
+    if getattr(args, "asin", None) and args.chapters == "embedded":
+        args.chapters = "audible"
     chapters = _resolve_chapters(args, info)
 
     if not args.output:
@@ -223,6 +318,20 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("input")
     pp.set_defaults(func=cmd_probe)
 
+    pa = sub.add_parser("audible",
+                        help="look up an audiobook's official chapters (Audnexus)")
+    pa.add_argument("title", nargs="?", help="book title to search for")
+    pa.add_argument("--author", help="narrow the search by author")
+    pa.add_argument("--asin", help="fetch this exact ASIN instead of searching")
+    pa.add_argument("--region", default="us",
+                    help="Audible marketplace (us, uk, ca, au, de, fr, jp, it, in, es)")
+    pa.add_argument("--search", action="store_true",
+                    help="list matching editions + ASINs instead of their chapters")
+    pa.add_argument("--limit", type=int, default=10, help="max search results")
+    pa.add_argument("--no-credits", action="store_true",
+                    help="drop 'Opening/End Credits' markers")
+    pa.set_defaults(func=cmd_audible)
+
     pc = sub.add_parser("convert", help="transcode + embed chapters (default)")
     pc.add_argument("input")
     pc.add_argument("-o", "--output", help="output path (default: alongside input)")
@@ -232,7 +341,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="audio bitrate (default: 64k, good for speech)")
     pc.add_argument("-c", "--chapters", default="embedded",
                     metavar="MODE|FILE",
-                    help="embedded | silence | equal | <path to chapters file>")
+                    help="embedded | silence | equal | audible[:ASIN] | "
+                         "<path to chapters file>")
+    # audible / audnexus options
+    pc.add_argument("--asin", help="Audible ASIN for official chapters "
+                                   "(implies --chapters audible)")
+    pc.add_argument("--region", default="us",
+                    help="Audible marketplace region for --chapters audible "
+                         "(us, uk, ca, au, de, fr, jp, it, in, es; default us)")
+    pc.add_argument("--no-credits", action="store_true",
+                    help="drop 'Opening/End Credits' markers from Audible chapters")
     # silence options
     pc.add_argument("--silence-db", type=float, default=-30.0,
                     help="silence threshold in dB (default: -30)")

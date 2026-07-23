@@ -15,8 +15,10 @@ from .core import (  # noqa: F401
     convert,
     detect_silence_chapters,
     equal_chapters,
+    fetch_audible_chapters,
     probe,
     read_embedded_chapters,
     parse_chapters_file,
+    search_audible,
 )
 from .coverart import find_cover, generate_placeholder  # noqa: F401

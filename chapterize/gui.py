@@ -28,8 +28,10 @@ from .core import (
     convert,
     detect_silence_chapters,
     equal_chapters,
+    fetch_audible_chapters,
     parse_chapters_file,
     probe,
+    search_audible,
 )
 
 AUDIO_TYPES = [
@@ -63,6 +65,9 @@ class App(ttk.Frame):
         self.cover_var = tk.StringVar()
         self.fetch_cover_var = tk.BooleanVar(value=True)
         self.generate_cover_var = tk.BooleanVar(value=False)
+        self.asin_var = tk.StringVar()
+        self.region_var = tk.StringVar(value="us")
+        self.no_credits_var = tk.BooleanVar(value=False)
 
         self._build()
         self.after(120, self._pump)
@@ -105,6 +110,7 @@ class App(ttk.Frame):
         cf.grid(row=r, column=1, columnspan=2, sticky="ew", padx=6)
         for txt, val in [("Detect by silence", "silence"),
                          ("Embedded", "embedded"),
+                         ("Official (Audible)", "audible"),
                          ("Equal parts", "equal"),
                          ("Chapters file", "file")]:
             ttk.Radiobutton(cf, text=txt, value=val, variable=self.mode_var,
@@ -173,6 +179,18 @@ class App(ttk.Frame):
                                 ("min chapter s", self.minch_var, 6)]:
                 ttk.Label(row, text=lbl).pack(side="left")
                 ttk.Entry(row, textvariable=var, width=w).pack(side="left", padx=(2, 10))
+        elif m == "audible":
+            ttk.Label(self.opt_frame,
+                      text="Uses the publisher's real chapter markers from "
+                           "Audible. Give the ASIN, or leave it blank to search "
+                           "by Title/Author below.").pack(anchor="w")
+            row = ttk.Frame(self.opt_frame); row.pack(anchor="w", pady=2)
+            ttk.Label(row, text="ASIN").pack(side="left")
+            ttk.Entry(row, textvariable=self.asin_var, width=14).pack(side="left", padx=(2, 10))
+            ttk.Label(row, text="Region").pack(side="left")
+            ttk.Entry(row, textvariable=self.region_var, width=4).pack(side="left", padx=(2, 10))
+            ttk.Checkbutton(row, text="drop credits",
+                            variable=self.no_credits_var).pack(side="left")
         elif m == "equal":
             row = ttk.Frame(self.opt_frame); row.pack(anchor="w", pady=2)
             ttk.Label(row, text="Number of chapters").pack(side="left")
@@ -261,6 +279,9 @@ class App(ttk.Frame):
             "silence_db": sv("db_var", "-30"),
             "silence_dur": sv("dur_var", "0.8"),
             "min_chapter": sv("minch_var", "90"),
+            "asin": self.asin_var.get(),
+            "region": self.region_var.get() or "us",
+            "no_credits": self.no_credits_var.get(),
         }
 
     def _compute_chapters(self, p: dict):
@@ -279,6 +300,35 @@ class App(ttk.Frame):
                 min_chapter=float(p["min_chapter"]),
                 progress=lambda msg: self.q.put(("log", msg)),
             )
+        if m == "audible":
+            asin = (p.get("asin") or "").strip()
+            region = p.get("region") or "us"
+            if not asin:
+                title = p.get("title") or info.tags.get("title")
+                author = (p.get("author") or info.tags.get("artist")
+                          or info.tags.get("album_artist"))
+                if not title:
+                    raise ChapterizeError(
+                        "Enter an ASIN, or a Title (and Author) to search Audible.")
+                self.q.put(("log", f"searching Audible for {title!r}…"))
+                hits = search_audible(title, author, region=region)
+                if not hits:
+                    raise ChapterizeError(
+                        f"No Audible match for {title!r}. Enter the ASIN directly.")
+                asin = hits[0]["asin"]
+                self.q.put(("log", f"matched {asin}  {hits[0].get('title')!r}"))
+            chapters, runtime_s = fetch_audible_chapters(
+                asin, region=region, keep_credits=not p.get("no_credits"),
+                progress=lambda msg: self.q.put(("log", msg)))
+            if runtime_s and info.duration:
+                drift = abs(runtime_s - info.duration)
+                if drift > max(30.0, 0.03 * info.duration):
+                    self.q.put(("log",
+                        f"WARNING: file is {info.duration/60:.0f} min but this "
+                        f"Audible edition is {runtime_s/60:.0f} min — different "
+                        "recording; timestamps may not line up."))
+            self.q.put(("log", f"{len(chapters)} official chapters fetched."))
+            return chapters
         if m == "equal":
             count = int(p["count"]) if str(p["count"]).strip() else None
             length = float(p["length"]) if str(p["length"]).strip() else None

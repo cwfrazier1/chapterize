@@ -10,6 +10,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
@@ -236,6 +239,116 @@ def parse_chapters_file(path: str) -> list:
         raise ChapterizeError(f"No chapters parsed from {path}")
     chapters.sort(key=lambda c: c.start)
     return chapters
+
+
+# ---------------------------------------------------------------------------
+# Official chapter markers via Audnexus (Audible's public metadata mirror)
+# ---------------------------------------------------------------------------
+AUDNEXUS_BASE = "https://api.audnex.us"
+AUDIBLE_CATALOG = "https://api.audible.com/1.0/catalog/products"
+_ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
+
+
+def _http_json(url: str, *, timeout: float = 20.0) -> dict:
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "chapterize/audnexus",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Audnexus returns a JSON error body we can surface verbatim.
+        try:
+            body = json.loads(e.read().decode("utf-8"))
+            msg = body.get("error", {})
+            msg = msg.get("message") if isinstance(msg, dict) else (msg or body.get("message"))
+        except Exception:
+            msg = None
+        raise ChapterizeError(
+            f"Lookup failed ({e.code}) for {url}"
+            + (f": {msg}" if msg else "")
+        )
+    except urllib.error.URLError as e:
+        raise ChapterizeError(f"Network error reaching {url}: {e.reason}")
+
+
+def search_audible(title: str, author: Optional[str] = None, *,
+                   region: str = "us", limit: int = 10) -> list:
+    """Search Audible's public catalog for an audiobook, newest/most relevant
+    first. Returns a list of dicts: {asin, title, authors, narrators,
+    runtime_min}. Raises ChapterizeError only on transport failure — an empty
+    list just means no match (common when an edition has been delisted)."""
+    if not title:
+        raise ChapterizeError("search_audible needs a title.")
+    kw = title if not author else f"{title} {author}"
+    params = {
+        "keywords": kw,
+        "num_results": str(max(1, min(limit, 50))),
+        "products_sort_by": "Relevance",
+        "response_groups": "contributors,product_desc,product_attrs",
+    }
+    host = AUDIBLE_CATALOG if region == "us" else AUDIBLE_CATALOG.replace(
+        "api.audible.com", f"api.audible.{_AUDIBLE_TLD.get(region, 'com')}")
+    data = _http_json(host + "?" + urllib.parse.urlencode(params))
+    out = []
+    for p in data.get("products", []):
+        out.append({
+            "asin": p.get("asin"),
+            "title": p.get("title"),
+            "authors": [a.get("name", "") for a in (p.get("authors") or [])],
+            "narrators": [a.get("name", "") for a in (p.get("narrators") or [])],
+            "runtime_min": p.get("runtime_length_min"),
+        })
+    return out
+
+
+# Audible marketplace → API TLD (Audnexus uses the same region codes).
+_AUDIBLE_TLD = {
+    "us": "com", "ca": "ca", "uk": "co.uk", "au": "com.au",
+    "fr": "fr", "de": "de", "jp": "co.jp", "it": "it", "in": "in", "es": "es",
+}
+
+
+def fetch_audible_chapters(asin: str, *, region: str = "us",
+                           keep_credits: bool = True,
+                           progress: Optional[Callable[[str], None]] = None
+                           ) -> "tuple[list, Optional[float]]":
+    """Fetch official chapter markers for an audiobook by ASIN from Audnexus.
+
+    Returns (chapters, runtime_seconds). runtime_seconds is the audiobook's
+    total length per Audible and is meant to be compared against the local
+    file's duration — a large mismatch means the ASIN is a *different edition*
+    (re-recording, abridgement) whose timestamps won't line up with your file.
+    """
+    asin = (asin or "").strip().upper()
+    if not _ASIN_RE.match(asin):
+        raise ChapterizeError(
+            f"{asin!r} is not a valid 10-character Audible ASIN.")
+    url = f"{AUDNEXUS_BASE}/books/{asin}/chapters?region={urllib.parse.quote(region)}"
+    if progress:
+        progress(f"fetching official chapters for {asin} ({region})")
+    data = _http_json(url)
+    raw = data.get("chapters")
+    if not raw:
+        raise ChapterizeError(
+            f"No chapters returned for ASIN {asin}. The edition may not carry "
+            "chapter markers, or may be unavailable in this region "
+            "(try --region uk/ca/au/de).")
+    chapters = []
+    for c in raw:
+        title = (c.get("title") or "").strip() or "Chapter"
+        if not keep_credits and title.lower() in (
+                "opening credits", "end credits", "credits"):
+            continue
+        chapters.append(Chapter(start=c.get("startOffsetMs", 0) / 1000.0,
+                                title=title))
+    if not chapters:
+        raise ChapterizeError(f"All chapters for ASIN {asin} were filtered out.")
+    chapters.sort(key=lambda c: c.start)
+    runtime_ms = data.get("runtimeLengthMs")
+    runtime_s = (runtime_ms / 1000.0) if runtime_ms else None
+    return chapters, runtime_s
 
 
 # ---------------------------------------------------------------------------

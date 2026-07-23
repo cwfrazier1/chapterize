@@ -66,18 +66,39 @@ chapterize convert lecture.wav -f m4b -c equal --count 24
 chapterize convert book.m4a -c chapters.txt \
     --title "My Book" --author "Jane Doe" --cover cover.jpg
 
+# Use the publisher's REAL chapter markers, looked up from Audible by ASIN
+chapterize convert book.mp3 --asin B0D7WF35B4
+
+# ...or let it search Audible by title/author to find the ASIN for you
+chapterize convert book.mp3 -c audible --title "Dead Med" --author "Freida McFadden"
+
+# Just look up a book's official chapters (no conversion)
+chapterize audible "Dead Med" --author "Freida McFadden"
+chapterize audible --asin B0D7WF35B4          # exact edition
+chapterize audible "Project Hail Mary" --search   # list editions + ASINs
+
 # Preview only — list chapters without encoding
 chapterize convert book.mp3 -c silence --dry-run
 ```
 
 ### Chapter sources (`-c` / `--chapters`)
 
-| Value        | Meaning                                                            |
-|--------------|-------------------------------------------------------------------|
-| `embedded`   | Copy chapters already present in the source (default)             |
-| `silence`    | Detect boundaries at long silences (tune with `--silence-*`)      |
-| `equal`      | Split into `--count N` equal parts, or `--length SECONDS` parts   |
-| *a file path*| Read a chapters sidecar file                                       |
+| Value          | Meaning                                                          |
+|----------------|------------------------------------------------------------------|
+| `embedded`     | Copy chapters already present in the source (default)            |
+| `silence`      | Detect boundaries at long silences (tune with `--silence-*`)     |
+| `equal`        | Split into `--count N` equal parts, or `--length SECONDS` parts  |
+| `audible[:ASIN]`| Fetch the **publisher's official chapter markers** from Audible (via the public [Audnexus](https://audnex.us) mirror). `--asin` for an exact edition, or search by `--title`/`--author`. |
+| *a file path*  | Read a chapters sidecar file                                     |
+
+> **Official chapters are the right way to chapter a flat file.** Silence and
+> equal-split *guess* at boundaries; `audible` gives you the exact chapter
+> titles and timestamps the publisher shipped. The catch: the ASIN's runtime
+> must match your file. Audiobooks that were re-recorded or re-released under a
+> new title (a different narrator, a revised edition) have **different**
+> timestamps — chapterize warns loudly when the Audible runtime drifts from
+> your file's, because those markers won't line up. Pick the ASIN whose length
+> matches your audio (use `chapterize audible … --search` to compare editions).
 
 ### Chapters file format
 

@@ -119,6 +119,55 @@ def test_build_ffmetadata_shape():
     assert "Two\\=weird\\;chars" in meta
 
 
+def test_audible_asin_validation():
+    from chapterize import core
+    try:
+        core.fetch_audible_chapters("not-an-asin")
+    except ChapterizeError:
+        pass
+    else:
+        raise AssertionError("expected ChapterizeError for bad ASIN")
+
+
+def test_audible_chapters_parse_and_credits():
+    from chapterize import core
+    fake = {
+        "runtimeLengthMs": 3600000,
+        "chapters": [
+            {"startOffsetMs": 0, "title": "Opening Credits"},
+            {"startOffsetMs": 5000, "title": "Prologue"},
+            {"startOffsetMs": 600000, "title": "Chapter 1"},
+            {"startOffsetMs": 3590000, "title": "End Credits"},
+        ],
+    }
+    orig = core._http_json
+    core._http_json = lambda url, **k: fake
+    try:
+        ch, rt = core.fetch_audible_chapters("B012345678")
+        assert rt == 3600.0
+        assert [c.title for c in ch] == [
+            "Opening Credits", "Prologue", "Chapter 1", "End Credits"]
+        assert ch[1].start == 5.0
+        ch2, _ = core.fetch_audible_chapters("B012345678", keep_credits=False)
+        assert [c.title for c in ch2] == ["Prologue", "Chapter 1"]
+    finally:
+        core._http_json = orig
+
+
+def test_audible_empty_chapters_raises():
+    from chapterize import core
+    orig = core._http_json
+    core._http_json = lambda url, **k: {"chapters": []}
+    try:
+        core.fetch_audible_chapters("B012345678")
+    except ChapterizeError:
+        pass
+    else:
+        raise AssertionError("expected ChapterizeError for empty chapters")
+    finally:
+        core._http_json = orig
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
